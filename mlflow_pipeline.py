@@ -4,14 +4,14 @@ import jax.numpy as jnp
 import kagglehub
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import mlflow
+import mlflow.sklearn
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-from metaflow import FlowSpec, step
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from imblearn.over_sampling import SMOTE
 
 # =====================================================================
-# CLASES DE MODELOS Y PROCESAMIENTO (Basado en ML_v1.5)
+# CLASES DE MODELOS Y PROCESAMIENTO
 # =====================================================================
 
 class DataPreprocessor:
@@ -24,7 +24,6 @@ class DataPreprocessor:
         if 'id' in df_clean.columns:
             df_clean = df_clean.drop(columns=['id'])
 
-        # Imputación
         numeric_cols = df_clean.select_dtypes(include=['int64', 'float64']).columns
         for col in numeric_cols:
             if df_clean[col].isna().any():
@@ -35,7 +34,6 @@ class DataPreprocessor:
             if df_clean[col].isna().any():
                 df_clean[col] = df_clean[col].fillna(df_clean[col].mode()[0])
 
-        # --- FEATURE ENGINEERING ---
         df_clean['is_senior'] = (df_clean['age'] > 65).astype(float)
         def categorize_bmi(bmi):
             if bmi < 18.5: return 'Underweight'
@@ -46,7 +44,6 @@ class DataPreprocessor:
         df_clean['comorbidity_index'] = df_clean['hypertension'] + df_clean['heart_disease']
         df_clean['smoking_risk'] = ((df_clean['age'] > 50) & 
                                    (df_clean['smoking_status'].isin(['smokes', 'formerly smoked']))).astype(float)
-        # ---------------------------
 
         X = df_clean.drop(columns=[target_col])
         y = df_clean[target_col].values.reshape(-1, 1)
@@ -89,7 +86,6 @@ class LogisticRegressionJAX:
     def train(self, X_train, y_train):
         n_features = X_train.shape[1]
         self.theta = jnp.zeros((n_features, 1))
-        # Simplificado para Metaflow (SMOTE ya balancea)
         for _ in range(self.epochs):
             loss, grad = jax.value_and_grad(lambda t: -jnp.mean(y_train * jnp.log(sigmoid(jnp.dot(X_train, t)) + 1e-15) + (1-y_train)*jnp.log(1-sigmoid(jnp.dot(X_train, t)) + 1e-15)))(self.theta)
             self.theta = self.theta - self.learning_rate * grad
@@ -138,14 +134,12 @@ class MultilayerPerceptronJAX:
         return sigmoid(jnp.dot(a1, w2) + b2)
 
 class SimpleFastDecisionTree:
-    def __init__(self, max_depth=6, min_samples_split=10, min_samples_leaf=5, n_thresholds=20, pos_weight=1.0, prediction_threshold=0.35):
+    def __init__(self, max_depth=6, min_samples_split=10, min_samples_leaf=5, prediction_threshold=0.35):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
-        self.n_thresholds = n_thresholds
-        self.pos_weight = pos_weight
         self.prediction_threshold = prediction_threshold
-        self.tree = None
+        self.sk_tree = None
 
     def fit(self, X, y):
         from sklearn.tree import DecisionTreeClassifier
@@ -159,9 +153,9 @@ class SimpleFastDecisionTree:
         return (self.predict_proba(X) >= self.prediction_threshold).astype(int)
 
 class AdaBoostJAX:
-    def __init__(self, n_estimators=50):
+    def __init__(self, n_estimators=100):
         self.n_estimators = n_estimators
-        self.stumps = []
+        self.sk_ada = None
 
     def fit(self, X, y):
         from sklearn.ensemble import AdaBoostClassifier
@@ -176,111 +170,91 @@ class AdaBoostJAX:
         return (self.predict_proba(X) >= threshold).astype(int)
 
 # =====================================================================
-# STROKE PREDICTION FLOW
+# MLFLOW PIPELINE
 # =====================================================================
 
-class StrokePredictionFlow(FlowSpec):
+def main():
+    print("Iniciando MLflow Pipeline...")
+    # Configurar el experimento de MLflow
+    mlflow.set_experiment("Stroke_Prediction_Models")
+    
+    # 1. Cargar Datos
+    print("Cargando dataset...")
+    path = kagglehub.dataset_download("fedesoriano/stroke-prediction-dataset")
+    df = pd.read_csv(os.path.join(path, "healthcare-dataset-stroke-data.csv"))
+    
+    # 2. Preprocesamiento y SMOTE
+    print("Preprocesando y aplicando SMOTE...")
+    processor = DataPreprocessor(umbral=0.35)
+    X_train_raw, X_test_raw, y_train_raw, y_test_raw = processor.prepare_data(df, target_col='stroke')
+    
+    sm = SMOTE(random_state=42)
+    X_train, y_train = sm.fit_resample(X_train_raw, y_train_raw.flatten())
+    
+    X_train = jnp.array(X_train)
+    y_train = jnp.array(y_train.reshape(-1, 1))
+    X_test = jnp.array(X_test_raw)
+    y_test = np.array(y_test_raw.reshape(-1, 1)).flatten()
 
-    @step
-    def start(self):
-        print("Iniciando Pipeline de Producción (Stroke Prediction)")
-        self.next(self.load_data)
+    models_to_train = {
+        "Linear Regression": (LinearRegressionJAX(processor), {}),
+        "Logistic Regression": (LogisticRegressionJAX(processor, learning_rate=0.1, epochs=1000), 
+                                {"learning_rate": 0.1, "epochs": 1000}),
+        "Decision Tree": (SimpleFastDecisionTree(max_depth=6), 
+                          {"max_depth": 6, "min_samples_split": 10, "min_samples_leaf": 5}),
+        "Multilayer Perceptron": (MultilayerPerceptronJAX(processor, hidden_size=32, learning_rate=0.005, epochs=3000), 
+                                  {"hidden_size": 32, "learning_rate": 0.005, "epochs": 3000}),
+        "AdaBoost": (AdaBoostJAX(n_estimators=100), 
+                     {"n_estimators": 100})
+    }
 
-    @step
-    def load_data(self):
-        path = kagglehub.dataset_download("fedesoriano/stroke-prediction-dataset")
-        self.df = pd.read_csv(os.path.join(path, "healthcare-dataset-stroke-data.csv"))
-        self.next(self.preprocess)
-
-    @step
-    def preprocess(self):
-        self.processor = DataPreprocessor(umbral=0.35)
-        X_train_raw, X_test, y_train_raw, y_test = self.processor.prepare_data(self.df, target_col='stroke')
-        
-        print("Aplicando SMOTE para balancear dataset...")
-        sm = SMOTE(random_state=42)
-        X_train, y_train = sm.fit_resample(X_train_raw, y_train_raw.flatten())
-        
-        self.X_train = jnp.array(X_train)
-        self.y_train = jnp.array(y_train.reshape(-1, 1))
-        self.X_test = jnp.array(X_test)
-        self.y_test = jnp.array(y_test.reshape(-1, 1))
-        
-        self.next(self.train_linear, self.train_logistic, self.train_dt, self.train_mlp, self.train_ada)
-
-    @step
-    def train_linear(self):
-        self.model = LinearRegressionJAX(self.processor)
-        self.model.train(self.X_train, self.y_train)
-        self.next(self.join)
-
-    @step
-    def train_logistic(self):
-        self.model = LogisticRegressionJAX(self.processor)
-        self.model.train(self.X_train, self.y_train)
-        self.next(self.join)
-
-    @step
-    def train_dt(self):
-        self.model = SimpleFastDecisionTree()
-        self.model.fit(np.array(self.X_train), np.array(self.y_train))
-        self.next(self.join)
-
-    @step
-    def train_mlp(self):
-        self.model = MultilayerPerceptronJAX(self.processor)
-        self.model.train(self.X_train, self.y_train)
-        self.next(self.join)
-
-    @step
-    def train_ada(self):
-        self.model = AdaBoostJAX(n_estimators=100)
-        self.model.fit(np.array(self.X_train), np.array(self.y_train))
-        self.next(self.join)
-
-    @step
-    def join(self, inputs):
-        self.models = {
-            'Linear': inputs.train_linear.model,
-            'Logistic': inputs.train_logistic.model,
-            'DecisionTree': inputs.train_dt.model,
-            'MLP': inputs.train_mlp.model,
-            'AdaBoost': inputs.train_ada.model
-        }
-        self.X_test = inputs.train_linear.X_test
-        self.y_test = inputs.train_linear.y_test
-        self.processor = inputs.train_linear.processor
-        self.next(self.evaluate)
-
-    @step
-    def evaluate(self):
-        results = []
-        y_true = np.array(self.y_test).flatten()
-        
-        for name, model in self.models.items():
-            if name == 'Linear':
-                y_pred = (np.array(model.predict(self.X_test)) >= 0.5).astype(int).flatten()
-            elif hasattr(model, 'predict_proba'):
-                y_pred = (model.predict_proba(np.array(self.X_test)) >= 0.35).astype(int).flatten()
-            else:
-                y_pred = model.predict(np.array(self.X_test)).flatten()
+    # 3. Entrenamiento y Tracking con MLflow
+    for model_name, (model, params) in models_to_train.items():
+        with mlflow.start_run(run_name=model_name):
+            print(f"Entrenando {model_name}...")
+            
+            # Log Parameters
+            mlflow.log_param("use_smote", True)
+            mlflow.log_param("umbral_decision", 0.35)
+            for param_name, param_value in params.items():
+                mlflow.log_param(param_name, param_value)
+            
+            # Entrenamiento
+            if hasattr(model, 'train'):
+                model.train(X_train, y_train)
+            elif hasattr(model, 'fit'):
+                model.fit(np.array(X_train), np.array(y_train))
                 
-            results.append({
-                'Modelo': name,
-                'Accuracy': accuracy_score(y_true, y_pred),
-                'Precision': precision_score(y_true, y_pred, zero_division=0),
-                'Recall': recall_score(y_true, y_pred, zero_division=0),
-                'F1': f1_score(y_true, y_pred, zero_division=0)
-            })
-        
-        self.metrics_df = pd.DataFrame(results)
-        print("\n--- RESULTADOS FINALES (METAFLOW) ---")
-        print(self.metrics_df.to_string(index=False))
-        self.next(self.end)
+            # Predicción
+            if model_name == 'Linear Regression':
+                y_pred = (np.array(model.predict(X_test)) >= 0.5).astype(int).flatten()
+            elif hasattr(model, 'predict_proba'):
+                y_pred = (model.predict_proba(np.array(X_test)) >= 0.35).astype(int).flatten()
+            else:
+                y_pred = model.predict(np.array(X_test)).flatten()
+            
+            # Métricas
+            acc = accuracy_score(y_test, y_pred)
+            prec = precision_score(y_test, y_pred, zero_division=0)
+            rec = recall_score(y_test, y_pred, zero_division=0)
+            f1 = f1_score(y_test, y_pred, zero_division=0)
+            
+            # Log Metrics
+            mlflow.log_metric("accuracy", acc)
+            mlflow.log_metric("precision", prec)
+            mlflow.log_metric("recall", rec)
+            mlflow.log_metric("f1_score", f1)
+            
+            # Log Model (Si es sklearn model podemos usar mlflow.sklearn)
+            if hasattr(model, 'sk_tree'):
+                mlflow.sklearn.log_model(model.sk_tree, "model")
+            elif hasattr(model, 'sk_ada'):
+                mlflow.sklearn.log_model(model.sk_ada, "model")
+            
+            print(f"[{model_name}] Recall: {rec:.3f} | F1: {f1:.3f}")
 
-    @step
-    def end(self):
-        print("Flujo finalizado exitosamente.")
+    print("\nPipeline ejecutado. Puedes ver los resultados iniciando la UI de MLflow:")
+    print("👉 mlflow ui --host 0.0.0.0 --port 5000")
 
-if __name__ == '__main__':
-    StrokePredictionFlow()
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Metaflow
+.metaflow/
+
+#MLflow
+mlruns/
+
+# IDEs
+.idea/
+.vscode/
+
+# Data and Notebooks
+.ipynb_checkpoints/
+healthcare-dataset-stroke-data.csv
+
+# Output plots
+*.png

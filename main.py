@@ -1,12 +1,17 @@
-# main.py
-from fastapi import FastAPI
+from pathlib import Path
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from app import app
 
-app = FastAPI()
+BASE_DIR = Path(__file__).resolve().parent
 
-@app.get("/")
-async def read_root():
-    return {"message": "Hello, World!"}
+# Mount the static directory for serving images
+app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+@app.get("/", include_in_schema=False)
+def serve_index():
+    return FileResponse(BASE_DIR / "index.html")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="[IP_ADDRESS]", port=8000, reload=True)   
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
