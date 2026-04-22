@@ -6,8 +6,10 @@ import pandas as pd
 import numpy as np
 import mlflow
 import mlflow.sklearn
+import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 from imblearn.over_sampling import SMOTE
 
 # =====================================================================
@@ -239,11 +241,21 @@ def main():
             rec = recall_score(y_test, y_pred, zero_division=0)
             f1 = f1_score(y_test, y_pred, zero_division=0)
             
-            # Log Metrics
+            # Matriz de Confusión
+            cm = confusion_matrix(y_test, y_pred)
+            fig, ax = plt.subplots(figsize=(5, 5))
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
+            ax.set_xlabel('Predicción')
+            ax.set_ylabel('Real')
+            ax.set_title(f'Matriz de Confusión - {model_name}')
+            
+            # Log Metrics y Artifacts
             mlflow.log_metric("accuracy", acc)
             mlflow.log_metric("precision", prec)
             mlflow.log_metric("recall", rec)
             mlflow.log_metric("f1_score", f1)
+            mlflow.log_figure(fig, f"confusion_matrix_{model_name.replace(' ', '_')}.png")
+            plt.close(fig)
             
             # Log Model (Si es sklearn model podemos usar mlflow.sklearn)
             if hasattr(model, 'sk_tree'):

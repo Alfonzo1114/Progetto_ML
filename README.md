@@ -70,8 +70,19 @@ python main.py
 # uvicorn app:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### 3. Levantar la Interfaz Web
-En una nueva terminal, sirve el archivo HTML:
+### 3. Seguimiento de Experimentos (MLflow)
+Para usar MLflow y comparar modelos y ver gráficas detalladas (como matrices de confusión):
+```bash
+# 1. Ejecutar el pipeline de MLflow
+python mlflow_pipeline.py
+
+# 2. Iniciar la interfaz de usuario de MLflow
+mlflow ui
+```
+Luego abrir [http://127.0.0.1:5000](http://127.0.0.1:5000) en el navegador.
+
+### 4. Levantar la Interfaz Web (App)
+En una nueva terminal, sirve el archivo HTML para interactuar con el modelo:
 ```bash
 python3 -m http.server 5500
 ```
